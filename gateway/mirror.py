@@ -67,10 +67,23 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
     """
     Find the active session_id for a platform + chat_id pair.
 
-    Scans sessions.json entries and matches where origin.chat_id == chat_id
-    on the right platform.  DM session keys don't embed the chat_id
-    (e.g. "agent:main:telegram:dm"), so we check the origin dict.
+    Queries state.db for matching sessions.  Falls back to sessions.json
+    for pre-migration databases.
     """
+    # Primary: query state.db
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            row = db.find_session_by_origin(platform, chat_id, thread_id=thread_id)
+        finally:
+            db.close()
+        if row:
+            return row.get("id")
+    except Exception as e:
+        logger.debug("Mirror: state.db lookup failed, falling back to sessions.json: %s", e)
+
+    # Fallback: read sessions.json
     if not _SESSIONS_INDEX.exists():
         return None
 

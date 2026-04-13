@@ -145,12 +145,49 @@ def _build_slack(adapter) -> List[Dict[str, str]]:
 
 
 def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
-    """Pull known channels/contacts from sessions.json origin data."""
+    """Pull known channels/contacts from state.db gateway metadata.
+
+    Falls back to sessions.json for pre-migration databases.
+    """
+    entries = []
+
+    # Primary: query state.db
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            rows = db.list_gateway_sessions(platform=platform_name)
+        finally:
+            db.close()
+        if rows:
+            seen_ids = set()
+            for row in rows:
+                origin_json = row.get("origin_json")
+                if not origin_json:
+                    continue
+                try:
+                    origin = json.loads(origin_json)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                entry_id = _session_entry_id(origin)
+                if not entry_id or entry_id in seen_ids:
+                    continue
+                seen_ids.add(entry_id)
+                entries.append({
+                    "id": entry_id,
+                    "name": _session_entry_name(origin),
+                    "type": row.get("chat_type", "dm"),
+                    "thread_id": origin.get("thread_id"),
+                })
+            return entries
+    except Exception as e:
+        logger.debug("Channel directory: state.db lookup failed, falling back: %s", e)
+
+    # Fallback: read sessions.json
     sessions_path = get_hermes_home() / "sessions" / "sessions.json"
     if not sessions_path.exists():
         return []
 
-    entries = []
     try:
         with open(sessions_path, encoding="utf-8") as f:
             data = json.load(f)

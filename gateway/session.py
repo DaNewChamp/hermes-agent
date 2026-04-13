@@ -764,6 +764,19 @@ class SessionStore:
                 self._db.create_session(**db_create_kwargs)
             except Exception as e:
                 print(f"[gateway] Warning: Failed to create SQLite session: {e}")
+            # Write gateway routing metadata to state.db so it can serve
+            # as the single source of truth (replacing sessions.json reads).
+            try:
+                self._db.set_gateway_metadata(
+                    session_id=entry.session_id,
+                    session_key=entry.session_key,
+                    platform=entry.platform.value if entry.platform else None,
+                    chat_type=entry.chat_type,
+                    origin_json=json.dumps(entry.origin.to_dict()) if entry.origin else None,
+                    display_name=entry.display_name,
+                )
+            except Exception as e:
+                logger.debug("Failed to write gateway metadata to state.db: %s", e)
 
         return entry
 
@@ -869,6 +882,17 @@ class SessionStore:
                 self._db.create_session(**db_create_kwargs)
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
+            try:
+                self._db.set_gateway_metadata(
+                    session_id=new_entry.session_id,
+                    session_key=new_entry.session_key,
+                    platform=new_entry.platform.value if new_entry.platform else None,
+                    chat_type=new_entry.chat_type,
+                    origin_json=json.dumps(new_entry.origin.to_dict()) if new_entry.origin else None,
+                    display_name=new_entry.display_name,
+                )
+            except Exception as e:
+                logger.debug("Failed to write gateway metadata to state.db: %s", e)
 
         return new_entry
 
@@ -917,6 +941,20 @@ class SessionStore:
                 self._db.end_session(db_end_session_id, "session_switch")
             except Exception as e:
                 logger.debug("Session DB end_session failed: %s", e)
+
+        # Update gateway metadata on the target session
+        if self._db and new_entry:
+            try:
+                self._db.set_gateway_metadata(
+                    session_id=new_entry.session_id,
+                    session_key=new_entry.session_key,
+                    platform=new_entry.platform.value if new_entry.platform else None,
+                    chat_type=new_entry.chat_type,
+                    origin_json=json.dumps(new_entry.origin.to_dict()) if new_entry.origin else None,
+                    display_name=new_entry.display_name,
+                )
+            except Exception as e:
+                logger.debug("Failed to write gateway metadata to state.db: %s", e)
 
         return new_entry
 

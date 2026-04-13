@@ -79,11 +79,45 @@ def _get_session_db():
 
 
 def _load_sessions_index() -> dict:
-    """Load the gateway sessions.json index directly.
+    """Load gateway session metadata from state.db.
 
     Returns a dict of session_key -> entry_dict with platform routing info.
-    This avoids importing the full SessionStore which needs GatewayConfig.
+    Falls back to reading sessions.json when state.db has no gateway metadata
+    (pre-migration databases).
     """
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            rows = db.list_gateway_sessions()
+        finally:
+            db.close()
+        if rows:
+            result = {}
+            for row in rows:
+                sk = row.get("session_key")
+                if not sk:
+                    continue
+                entry = {
+                    "session_key": sk,
+                    "session_id": row.get("id", ""),
+                    "platform": row.get("platform", ""),
+                    "chat_type": row.get("chat_type", "dm"),
+                    "display_name": row.get("display_name"),
+                    "memory_flushed": bool(row.get("memory_flushed", 0)),
+                }
+                origin_json = row.get("origin_json")
+                if origin_json:
+                    try:
+                        entry["origin"] = json.loads(origin_json)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                result[sk] = entry
+            return result
+    except Exception as e:
+        logger.debug("Failed to load sessions from state.db: %s", e)
+
+    # Fallback: read sessions.json for pre-migration databases
     sessions_file = _get_sessions_dir() / "sessions.json"
     if not sessions_file.exists():
         return {}
@@ -200,8 +234,7 @@ class EventBridge:
         self._last_poll_timestamps: Dict[str, float] = {}  # session_key -> unix timestamp
         # In-memory approval tracking (populated from events)
         self._pending_approvals: Dict[str, dict] = {}
-        # mtime cache — skip expensive work when files haven't changed
-        self._sessions_json_mtime: float = 0.0
+        # mtime cache — skip expensive work when state.db hasn't changed
         self._state_db_mtime: float = 0.0
         self._cached_sessions_index: dict = {}
 
@@ -327,21 +360,10 @@ class EventBridge:
     def _poll_once(self, db):
         """Check for new messages across all sessions.
 
-        Uses mtime checks on sessions.json and state.db to skip work
-        when nothing has changed — makes 200ms polling essentially free.
+        Uses mtime check on state.db to skip work when nothing has changed
+        — makes 200ms polling essentially free.
         """
-        # Check if sessions.json has changed (mtime check is ~1μs)
-        sessions_file = _get_sessions_dir() / "sessions.json"
-        try:
-            sj_mtime = sessions_file.stat().st_mtime if sessions_file.exists() else 0.0
-        except OSError:
-            sj_mtime = 0.0
-
-        if sj_mtime != self._sessions_json_mtime:
-            self._sessions_json_mtime = sj_mtime
-            self._cached_sessions_index = _load_sessions_index()
-
-        # Check if state.db has changed
+        # Check if state.db has changed (mtime check is ~1μs)
         try:
             from hermes_constants import get_hermes_home
             db_file = get_hermes_home() / "state.db"
@@ -353,10 +375,13 @@ class EventBridge:
         except OSError:
             db_mtime = 0.0
 
-        if db_mtime == self._state_db_mtime and sj_mtime == self._sessions_json_mtime:
+        if db_mtime == self._state_db_mtime:
             return  # Nothing changed since last poll — skip entirely
 
         self._state_db_mtime = db_mtime
+        # Reload the session index from state.db on every change since
+        # new sessions may have been created.
+        self._cached_sessions_index = _load_sessions_index()
         entries = self._cached_sessions_index
 
         for session_key, entry in entries.items():

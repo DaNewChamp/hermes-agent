@@ -421,7 +421,21 @@ def show_status(args):
     print(color("◆ Sessions", Colors.CYAN, Colors.BOLD))
     
     sessions_file = get_hermes_home() / "sessions" / "sessions.json"
-    if sessions_file.exists():
+    # Primary: count gateway sessions from state.db
+    _session_count_shown = False
+    try:
+        from hermes_state import SessionDB
+        _sdb = SessionDB()
+        try:
+            _gw_sessions = _sdb.list_gateway_sessions()
+        finally:
+            _sdb.close()
+        print(f"  Active:       {len(_gw_sessions)} session(s)")
+        _session_count_shown = True
+    except Exception:
+        pass
+    # Fallback: sessions.json
+    if not _session_count_shown and sessions_file.exists():
         import json
         try:
             with open(sessions_file, encoding="utf-8") as f:

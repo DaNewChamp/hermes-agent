@@ -1819,6 +1819,11 @@ class GatewayRunner:
                         with self.session_store._lock:
                             entry.memory_flushed = True
                             self.session_store._save()
+                        if self._session_db:
+                            try:
+                                self._session_db.set_memory_flushed(entry.session_id)
+                            except Exception:
+                                pass
                         logger.debug(
                             "Memory flush completed for session %s",
                             entry.session_id,
@@ -1836,6 +1841,11 @@ class GatewayRunner:
                             with self.session_store._lock:
                                 entry.memory_flushed = True
                                 self.session_store._save()
+                            if self._session_db:
+                                try:
+                                    self._session_db.set_memory_flushed(entry.session_id)
+                                except Exception:
+                                    pass
                             _flush_failures.pop(entry.session_id, None)
                         else:
                             logger.debug(

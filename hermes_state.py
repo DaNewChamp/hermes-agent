@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_source TEXT,
     pricing_version TEXT,
     title TEXT,
+    session_key TEXT,
+    platform TEXT,
+    chat_type TEXT,
+    origin_json TEXT,
+    display_name TEXT,
+    memory_flushed INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -329,6 +335,36 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                # v7: add gateway routing metadata columns to sessions table.
+                # These columns allow state.db to serve as the single source of
+                # truth for session discovery, replacing sessions.json reads.
+                for col_name, col_type in [
+                    ("session_key", "TEXT"),
+                    ("platform", "TEXT"),
+                    ("chat_type", "TEXT"),
+                    ("origin_json", "TEXT"),
+                    ("display_name", "TEXT"),
+                    ("memory_flushed", "INTEGER DEFAULT 0"),
+                ]:
+                    try:
+                        safe = col_name.replace('"', '""')
+                        cursor.execute(
+                            f'ALTER TABLE sessions ADD COLUMN "{safe}" {col_type}'
+                        )
+                    except sqlite3.OperationalError:
+                        pass  # Column already exists
+                # Create index on session_key for fast lookups
+                try:
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_sessions_session_key "
+                        "ON sessions(session_key)"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                # Backfill from sessions.json if it exists
+                self._backfill_gateway_metadata_v7(cursor)
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -340,6 +376,15 @@ class SessionDB:
         except sqlite3.OperationalError:
             pass  # Index already exists
 
+        # session_key index for gateway metadata lookups
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_session_key "
+                "ON sessions(session_key)"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # FTS5 setup (separate because CREATE VIRTUAL TABLE can't be in executescript with IF NOT EXISTS reliably)
         try:
             cursor.execute("SELECT * FROM messages_fts LIMIT 0")
@@ -347,6 +392,37 @@ class SessionDB:
             cursor.executescript(FTS_SQL)
 
         self._conn.commit()
+
+    def _backfill_gateway_metadata_v7(self, cursor):
+        """Backfill gateway routing metadata from sessions.json during v7 migration."""
+        try:
+            sessions_dir = get_hermes_home() / "sessions"
+            sessions_file = sessions_dir / "sessions.json"
+            if not sessions_file.exists():
+                return
+            with open(sessions_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for _key, entry in data.items():
+                session_id = entry.get("session_id", "")
+                if not session_id:
+                    continue
+                session_key = entry.get("session_key", _key)
+                platform = entry.get("platform", "")
+                chat_type = entry.get("chat_type", "dm")
+                display_name = entry.get("display_name")
+                origin = entry.get("origin")
+                origin_json = json.dumps(origin) if origin else None
+                memory_flushed = 1 if entry.get("memory_flushed") else 0
+                cursor.execute(
+                    """UPDATE sessions SET
+                        session_key = ?, platform = ?, chat_type = ?,
+                        origin_json = ?, display_name = ?, memory_flushed = ?
+                    WHERE id = ? AND session_key IS NULL""",
+                    (session_key, platform, chat_type, origin_json,
+                     display_name, memory_flushed, session_id),
+                )
+        except Exception as e:
+            logger.debug("v7 backfill from sessions.json failed (non-fatal): %s", e)
 
     # =========================================================================
     # Session lifecycle
@@ -381,6 +457,112 @@ class SessionDB:
             )
         self._execute_write(_do)
         return session_id
+
+    def set_gateway_metadata(
+        self,
+        session_id: str,
+        session_key: str = None,
+        platform: str = None,
+        chat_type: str = None,
+        origin_json: str = None,
+        display_name: str = None,
+    ) -> None:
+        """Write gateway routing metadata for a session.
+
+        Called by the gateway after creating or resuming a session so that
+        state.db becomes the single source of truth for session discovery.
+        Uses UPDATE (not UPSERT) — the session row must already exist.
+        """
+        sets = []
+        params = []
+        if session_key is not None:
+            sets.append("session_key = ?")
+            params.append(session_key)
+        if platform is not None:
+            sets.append("platform = ?")
+            params.append(platform)
+        if chat_type is not None:
+            sets.append("chat_type = ?")
+            params.append(chat_type)
+        if origin_json is not None:
+            sets.append("origin_json = ?")
+            params.append(origin_json)
+        if display_name is not None:
+            sets.append("display_name = ?")
+            params.append(display_name)
+        if not sets:
+            return
+        params.append(session_id)
+        sql = f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?"
+
+        def _do(conn):
+            conn.execute(sql, params)
+        self._execute_write(_do)
+
+    def set_memory_flushed(self, session_id: str, flushed: bool = True) -> None:
+        """Mark a session as having its memory flushed."""
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET memory_flushed = ? WHERE id = ?",
+                (1 if flushed else 0, session_id),
+            )
+        self._execute_write(_do)
+
+    def list_gateway_sessions(self, platform: str = None) -> List[Dict[str, Any]]:
+        """List sessions that have gateway routing metadata.
+
+        Returns dicts with: id, session_key, platform, chat_type,
+        origin_json, display_name, source, started_at, ended_at, title,
+        message_count, memory_flushed.
+
+        When ``platform`` is given, only sessions for that platform are returned.
+        Only sessions with a non-NULL session_key are included (i.e. sessions
+        that were created through the gateway, not bare CLI sessions).
+        """
+        where = "WHERE session_key IS NOT NULL"
+        params = []
+        if platform:
+            where += " AND platform = ?"
+            params.append(platform)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT id, session_key, platform, chat_type, origin_json,
+                       display_name, source, started_at, ended_at, title,
+                       message_count, memory_flushed
+                FROM sessions {where}
+                ORDER BY started_at DESC""",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_session_by_origin(
+        self, platform: str, chat_id: str, thread_id: str = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Find the most recent session for a platform + chat_id pair.
+
+        Searches the origin_json column for matching chat_id.  When
+        ``thread_id`` is given, also matches on thread_id.  Returns the
+        session dict or None.
+        """
+        # Use JSON extraction for matching.  SQLite json_extract is
+        # available in all modern builds (3.9+).
+        sql = """
+            SELECT id, session_key, platform, chat_type, origin_json,
+                   display_name, source, started_at, ended_at, title,
+                   memory_flushed
+            FROM sessions
+            WHERE platform = ?
+              AND json_extract(origin_json, '$.chat_id') = ?
+              AND session_key IS NOT NULL
+        """
+        params: list = [platform, str(chat_id)]
+        if thread_id is not None:
+            sql += " AND json_extract(origin_json, '$.thread_id') = ?"
+            params.append(str(thread_id))
+        sql += " ORDER BY started_at DESC LIMIT 1"
+        with self._lock:
+            row = self._conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
 
     def end_session(self, session_id: str, end_reason: str) -> None:
         """Mark a session as ended."""
