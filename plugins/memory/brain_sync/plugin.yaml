@@ -1,0 +1,5 @@
+name: brain_sync
+version: 1.0.0
+description: "AI Brain-backed shared memory sync with proposal/review gating for Hermes."
+requires_env:
+  - BRAIN_URL

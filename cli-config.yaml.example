@@ -369,6 +369,10 @@ compression:
 memory:
   # Agent's personal notes: environment facts, conventions, things learned
   memory_enabled: true
+
+  # Optional external provider. Example: brain_sync mirrors Hermes memory into
+  # AI Brain using the same proposal/review queue used by Telegram/Codex.
+  # provider: brain_sync
   
   # User profile: preferences, communication style, expectations
   user_profile_enabled: true

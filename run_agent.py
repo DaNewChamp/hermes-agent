@@ -1272,6 +1272,9 @@ class AIAgent:
                             "platform": platform or "cli",
                             "hermes_home": str(_ghh()),
                             "agent_context": "primary",
+                            "source_runtime": "hermes",
+                            "source_provider": self.provider,
+                            "source_model": self.model,
                         }
                         # Thread session title for memory provider scoping
                         # (e.g. honcho uses this to derive chat-scoped session keys)
@@ -7329,6 +7332,10 @@ class AIAgent:
                         function_args.get("action", ""),
                         target,
                         function_args.get("content", ""),
+                        source_runtime="hermes",
+                        source_provider=self.provider,
+                        source_model=self.model,
+                        session_id=self.session_id,
                     )
                 except Exception:
                     pass
