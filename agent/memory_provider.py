@@ -26,7 +26,7 @@ Optional hooks (override to opt in):
   on_turn_start(turn, message, **kwargs) — per-turn tick with runtime context
   on_session_end(messages)               — end-of-session extraction
   on_pre_compress(messages) -> str       — extract before context compression
-  on_memory_write(action, target, content) — mirror built-in memory writes
+  on_memory_write(action, target, content, **kwargs) — mirror built-in memory writes
   on_delegation(task, result, **kwargs)  — parent-side observation of subagent work
 """
 
@@ -220,12 +220,18 @@ class MemoryProvider(ABC):
           should all have ``env_var`` set and this method stays no-op).
         """
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(self, action: str, target: str, content: str, **kwargs) -> None:
         """Called when the built-in memory tool writes an entry.
 
         action: 'add', 'replace', or 'remove'
         target: 'memory' or 'user'
         content: the entry content
+
+        Optional kwargs may include runtime metadata such as:
+        - source_runtime
+        - source_provider
+        - source_model
+        - session_id
 
         Use to mirror built-in memory writes to your backend.
         """

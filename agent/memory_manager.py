@@ -29,6 +29,7 @@ Usage in run_agent.py:
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -312,16 +313,22 @@ class MemoryManager:
                 )
         return "\n\n".join(parts)
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(self, action: str, target: str, content: str, **kwargs) -> None:
         """Notify external providers when the built-in memory tool writes.
 
         Skips the builtin provider itself (it's the source of the write).
+        Extra kwargs carry runtime metadata for providers that can use it.
         """
         for provider in self._providers:
             if provider.name == "builtin":
                 continue
             try:
-                provider.on_memory_write(action, target, content)
+                parameters = inspect.signature(provider.on_memory_write).parameters.values()
+                supports_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+                if supports_kwargs:
+                    provider.on_memory_write(action, target, content, **kwargs)
+                else:
+                    provider.on_memory_write(action, target, content)
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_memory_write failed: %s",
